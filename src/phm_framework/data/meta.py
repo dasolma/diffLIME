@@ -172,7 +172,7 @@ def noise_ratio(a):
     # Detrend the series
     residual = detrend(a, type='linear')
 
-    return  np.var(residual)
+    return np.var(residual)
 
 
 def extract_top_frequencies(time_series, sampling_rate=1, top_n=3):
