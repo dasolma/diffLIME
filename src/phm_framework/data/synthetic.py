@@ -229,3 +229,7 @@ def adjust_slope(time_series, target_slope, time=None):
     # scaled_series = ((adjusted_series - adjusted_min) / (adjusted_max - adjusted_min)) * (original_max - original_min) + original_min
 
     return scaled_series
+
+
+def frecuency_estimator(frecuencies):
+

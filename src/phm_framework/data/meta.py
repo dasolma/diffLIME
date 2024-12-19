@@ -161,18 +161,25 @@ def calculate_entropy(x):
 
 def noise_ratio(a):
     """
-    Calculate the signal-to-noise ratio for a given signal.
+    Calculate the signal-to-noise ratio (SNR) for a given signal.
 
     Args:
     - a (numpy.ndarray): Input signal.
 
     Returns:
-    - float: Signal-to-noise ratio.
+    - float: Signal-to-noise ratio in dB.
     """
-    # Detrend the series
+    # Calculate the residual (noise) by detrending the signal
     residual = detrend(a, type='linear')
 
-    return np.var(residual)
+    # Calculate the power of the signal and noise
+    power_signal = np.var(a)  # Variance of the original signal (includes both signal and noise)
+    power_noise = np.var(residual)  # Variance of the residual (noise)
+
+    # Compute SNR in decibels
+    snr = 10 * np.log10(power_signal / (power_noise ** 2))
+
+    return snr
 
 
 def extract_top_frequencies(time_series, sampling_rate=1, top_n=3):
