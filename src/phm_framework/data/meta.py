@@ -288,7 +288,7 @@ def calculate_stability_and_slope(x):
     - float: Stability of the signal.
     """
     # Calculate the linear regression of the signal x
-    slope, intercept, r_value, p_value, std_err = stats.linregress(x, y=np.arange(0, len(x)))
+    slope, intercept, r_value, p_value, std_err = stats.linregress(np.arange(0, len(x)), y=x)
 
     # Calculate the stability as the absolute value of the coefficient of determination
     stability = np.abs(r_value ** 2)

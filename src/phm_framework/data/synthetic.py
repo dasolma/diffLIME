@@ -267,10 +267,10 @@ def extract_envelopes(time_series, time=None):
 
 def assign_cluster_probabilities(new_series, centroids, metric='dtw', temperature=1.0):
     """
-    Asigna probabilidades a cada cluster para una nueva serie temporal.
+    Asigna probabilidades a cada cluster para nuevas series temporales.
 
     Args:
-        new_series (numpy.ndarray): Nueva serie temporal (1D).
+        new_series (numpy.ndarray): Nuevas series temporales (2D).
         centroids (numpy.ndarray): Centroides de los clusters.
         metric (str): La métrica a usar ('dtw' o 'sbd').
         temperature (float): Factor para ajustar la suavidad de las probabilidades.
@@ -279,55 +279,120 @@ def assign_cluster_probabilities(new_series, centroids, metric='dtw', temperatur
         numpy.ndarray: Vector de probabilidades para cada cluster.
     """
     # Calcular la distancia entre la nueva serie y cada centroide
-    distances = []
-    for centroid in centroids:
-        if metric == 'dtw':
-            distance = dtw(new_series, centroid)
-        elif metric == 'sbd':
-            distance, _ = sbd(new_series, centroid)
-        else:
-            raise ValueError("Métrica no soportada. Usa 'dtw' o 'sbd'.")
-        distances.append(distance)
-
+    if metric == 'dtw':
+        distance_func = dtw
+    elif metric == 'sbd':
+        distance_func, _ = sbd
+    else:
+        raise ValueError("Métrica no soportada. Usa 'dtw' o 'sbd'.")
+    distances = [[distance_func(e, c) for c in centroids] for e in new_series]
     distances = np.array(distances)
 
     # Convertir las distancias a probabilidades usando una distribución exponencial inversa
     scores = np.exp(-distances / temperature)
-    probabilities = scores / scores.sum()
+    probabilities = np.array([p / p.sum() for p in scores])
 
     return probabilities
 
 
-def generate_distributions(X, frequences=None, chunks=10, top_n=5):
-    if frequences is None:
-        frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
+def generate_distributions(X, centroids, chunks=10, top_n=5):
+    envelopes = np.array([extract_envelopes(e) for e in X])
+    frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
+    env_probs = assign_cluster_probabilities(envelopes, centroids)
 
-    if len(frequences.shape) == 1 and frequences.shape[0] > 0:
-        noise_ratios = np.array([meta.noise_ratio(s) for s in X])
-        stability, slope = list(zip(*[meta.calculate_stability_and_slope(s) for s in X]))
-        slope = np.array(slope)
-        return [[{"N": frequences.shape[0],
-                  "frec_dist": (frequences.mean(), frequences.std()),
-                  "slope_dist": (slope.mean(), slope.std()),
-                  "noise_dist": (noise_ratios.mean(), noise_ratios.std())
-                  }]]
-    elif len(frequences.shape) == 1 and frequences.shape[0] == 0:
-        return [[{"frec_dist": (np.nan,)}]]
-    elif len(frequences.shape) == 0 or frequences.shape[0] == 0:
-        return [[{"frec_dist": (np.nan,)}]]
-    else:
-        freq = frequences[:, 0]
-        freq_points = np.linspace(freq.min(), freq.max(), chunks)
-        freq_ranges = list(zip(freq_points[:-1], freq_points[1:]))
+    def generate_distributions_aux(X, env_probs, frequences, chunks=10):
 
-        results = []
-        for i, j in freq_ranges:
-            for next_frec in generate_distributions(X[np.where((freq >= i) & (freq < j))],
-                                                    frequences[np.where((freq >= i) & (freq < j)), 1:].squeeze()):
-                if (not np.isnan(next_frec[-1]["frec_dist"][0]) and
-                        len(next_frec) == frequences.shape[1] - 1):
-                    results.append([{"N": frequences.shape[0],
-                                     "frec_dist": (freq.mean(), freq.std())
-                                     }] + next_frec)
+        if len(frequences.shape) == 1 and frequences.shape[0] > 0:
+            noise_ratios = np.array([meta.noise_ratio(s) for s in X])
+            stability, slope = list(zip(*[meta.calculate_stability_and_slope(s) for s in X]))
+            slope = np.array(slope)
+            return [[{"N": frequences.shape[0],
+                      "frec_dist": (frequences.mean(), frequences.std()),
+                      "slope_dist": (slope.mean(), slope.std()),
+                      "noise_dist": (noise_ratios.mean(), noise_ratios.std()),
+                      "env_probs": env_probs.mean(axis=0)
+                      }]]
+        elif len(frequences.shape) == 1 and frequences.shape[0] == 0:
+            return [[{"frec_dist": (np.nan,)}]]
+        elif len(frequences.shape) == 0 or frequences.shape[0] == 0:
+            return [[{"frec_dist": (np.nan,)}]]
+        else:
+            freq = frequences[:, 0]
+            freq_points = np.linspace(freq.min(), freq.max(), chunks)
+            freq_ranges = list(zip(freq_points[:-1], freq_points[1:]))
 
-        return results
+            results = []
+            for i, j in freq_ranges:
+                mask = np.where((freq >= i) & (freq < j))
+                for next_frec in generate_distributions_aux(X[mask],
+                                                            env_probs[mask],
+                                                            frequences[mask, 1:].squeeze()):
+                    if (not np.isnan(next_frec[-1]["frec_dist"][0]) and
+                            len(next_frec) == frequences.shape[1] - 1):
+                        results.append([{"N": frequences.shape[0],
+                                         "frec_dist": (freq.mean(), freq.std())
+                                         }] + next_frec)
+
+            return results
+
+    return generate_distributions_aux(X, env_probs, frequences, chunks)
+
+
+def generate_synth_data(X, N=10000, chunks=10, top_n=5):
+
+    N4cluster = 1000
+    indexes = np.arange(1, X.shape[0])
+    np.random.shuffle(indexes)
+
+    envolventes = [extract_envelopes(eliminar_pendiente(X[indexes[i]])) for i in range(N4cluster)]
+    series_temporales = np.array(envolventes)[:N4cluster, :, :]
+
+    # Aplicar clustering con K-means y DTW
+    n_clusters = 10
+    labels, centroids, stds, kmeans = clusterizar_series_temporales(series_temporales, n_clusters, metric='dtw')
+
+    distributions = generate_distributions(X, centroids, chunks, top_n)
+
+    Ns = np.array([d[-1]['N'] for d in distributions])
+    Ns = np.array(np.round((Ns / np.sum(Ns)) * N), dtype=int)
+
+    XX = np.zeros((N, X.shape[1]))
+    EE = np.zeros((N, 2, X.shape[1]))
+    M = np.zeros((N, top_n + 3))
+    time = np.linspace(0, 10, X.shape[1])
+    i = 0
+    for d, n in zip(distributions, Ns):
+        for _ in range(n):
+            frequencies = [np.random.normal(*f["frec_dist"]) for f in d]
+            slope = np.random.normal(*d[-1]["slope_dist"])
+            noise = np.random.normal(*d[-1]["noise_dist"])
+            ienvelope = np.random.choice(np.arange(len(d[-1]["env_probs"])), p=d[-1]["env_probs"])
+            eu, el = np.random.normal(centroids[ienvelope], stds[ienvelope] * 0.5)
+            EE[i, 0] = eu
+            EE[i, 1] = el
+
+            s = np.zeros((128,))
+            for f in frequencies:
+                s += np.sin(time * f)
+
+            s, _ = adjust_to_envelopes_preserving_shape(s, eu, el)
+            s = adjust_slope(s, slope)
+
+            XX[i] = s
+
+            M[i] = frequencies + [slope, noise, ienvelope]
+
+            i += 1
+            if i >= XX.shape[0]:
+                break
+
+        if i >= XX.shape[0]:
+            break
+
+    return (XX, EE, M), (centroids, stds, kmeans)
+
+
+
+
+
+
