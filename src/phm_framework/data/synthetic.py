@@ -234,16 +234,18 @@ def adjust_slope(time_series, target_slope, time=None):
     return scaled_series
 
 
-def generate_distributions(X, chunks=10, top_n=5):
-    frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
+def generate_distributions(X, frequences=None, chunks=10, top_n=5):
+    if frequences is None:
+        frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
 
     if len(frequences.shape) == 1:
+        noise_ratios = np.array([meta.noise_ratio(s) for s in X])
         return [[{"N": frequences.shape[0],
-                  "mean": frequences.mean(),
-                  "std": frequences.std()}]]
+                  "frec_dist": (frequences.mean(), frequences.std()),
+                  "noise_dist": (noise_ratios.mean(), noise_ratios.std())
+                  }]]
     elif len(frequences.shape) == 0 or frequences.shape[0] == 0:
-        return [[{"mean": np.nan,
-                 "std": np.nan}]]
+        return [[{"frec_dist": (np.nan,)}]]
     else:
         freq = frequences[:, 0]
         freq_points = np.linspace(freq.min(), freq.max(), chunks)
@@ -251,11 +253,12 @@ def generate_distributions(X, chunks=10, top_n=5):
 
         results = []
         for i, j in freq_ranges:
-            for next_frec in generate_distributions(frequences[np.where((freq >= i) & (freq < j)), 1:].squeeze()):
-                if not np.isnan(next_frec[-1]["mean"]) and len(next_frec) == frequences.shape[1]-1:
+            for next_frec in generate_distributions(X[np.where((freq >= i) & (freq < j))],
+                                                    frequences[np.where((freq >= i) & (freq < j)), 1:].squeeze()):
+                if (not np.isnan(next_frec[-1]["frec_dist"][0]) and
+                        len(next_frec) == frequences.shape[1] - 1):
                     results.append([{"N": frequences.shape[0],
-                                     "mean": freq.mean(),
-                                     "std": freq.std()}] + next_frec)
+                                     "frec_dist": (freq.mean(), freq.std())
+                                     }] + next_frec)
 
         return results
-
