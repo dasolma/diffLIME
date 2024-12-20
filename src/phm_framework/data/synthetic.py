@@ -4,6 +4,9 @@ from tslearn.metrics import dtw
 from scipy.signal import correlate
 from sklearn.linear_model import LinearRegression
 
+from src.phm_framework.data import meta
+
+
 def sbd(x, y):
     """
     Shape-Based Distance (SBD) between two time series.
@@ -231,5 +234,28 @@ def adjust_slope(time_series, target_slope, time=None):
     return scaled_series
 
 
-def frecuency_estimator(frecuencies):
+def generate_distributions(X, chunks=10, top_n=5):
+    frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
+
+    if len(frequences.shape) == 1:
+        return [[{"N": frequences.shape[0],
+                  "mean": frequences.mean(),
+                  "std": frequences.std()}]]
+    elif len(frequences.shape) == 0 or frequences.shape[0] == 0:
+        return [[{"mean": np.nan,
+                 "std": np.nan}]]
+    else:
+        freq = frequences[:, 0]
+        freq_points = np.linspace(freq.min(), freq.max(), chunks)
+        freq_ranges = list(zip(freq_points[:-1], freq_points[1:]))
+
+        results = []
+        for i, j in freq_ranges:
+            for next_frec in generate_distributions(frequences[np.where((freq >= i) & (freq < j)), 1:].squeeze()):
+                if not np.isnan(next_frec[-1]["mean"]) and len(next_frec) == frequences.shape[1]-1:
+                    results.append([{"N": frequences.shape[0],
+                                     "mean": freq.mean(),
+                                     "std": freq.std()}] + next_frec)
+
+        return results
 
