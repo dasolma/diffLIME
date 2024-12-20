@@ -1,10 +1,10 @@
 import numpy as np
+from scipy.interpolate import interp1d
 from sklearn.cluster import KMeans
 from tslearn.metrics import dtw
-from scipy.signal import correlate
+from scipy.signal import correlate, find_peaks
 from sklearn.linear_model import LinearRegression
-
-from src.phm_framework.data import meta
+from phm_framework.data import meta
 
 
 def sbd(x, y):
@@ -147,7 +147,7 @@ def clusterizar_series_temporales(series_temporales, n_clusters=3, metric='dtw')
     # Compute cluster centroids
     centroids, stds = calculate_centroids(series_temporales, labels, n_clusters, metric)
 
-    return labels, centroids, stds
+    return labels, centroids, stds, kmeans
 
 
 def adjust_to_envelopes_preserving_shape(original_signal, upper_envelope, lower_envelope):
@@ -234,16 +234,85 @@ def adjust_slope(time_series, target_slope, time=None):
     return scaled_series
 
 
+def extract_envelopes(time_series, time=None):
+    """
+    Extracts the upper and lower envelopes of a time series.
+
+    Args:
+        time_series (numpy.ndarray): Time series (1D).
+        time (numpy.ndarray, optional): Times associated with the series. If not specified, a linear index is used.
+
+    Returns:
+        tuple: (upper_envelope, lower_envelope)
+    """
+    if time is None:
+        time = np.arange(len(time_series))
+
+    # Find maximum peaks (upper envelope)
+    upper_peaks, _ = find_peaks(time_series)
+    # Find minimum peaks (lower envelope)
+    lower_peaks, _ = find_peaks(-time_series)
+
+    # Interpolation to generate the envelopes
+    upper_interp = interp1d(time[upper_peaks], time_series[upper_peaks],
+                            kind="linear", bounds_error=False, fill_value="extrapolate")
+    lower_interp = interp1d(time[lower_peaks], time_series[lower_peaks],
+                            kind="linear", bounds_error=False, fill_value="extrapolate")
+
+    upper_envelope = upper_interp(time)
+    lower_envelope = lower_interp(time)
+
+    return upper_envelope, lower_envelope
+
+
+def assign_cluster_probabilities(new_series, centroids, metric='dtw', temperature=1.0):
+    """
+    Asigna probabilidades a cada cluster para una nueva serie temporal.
+
+    Args:
+        new_series (numpy.ndarray): Nueva serie temporal (1D).
+        centroids (numpy.ndarray): Centroides de los clusters.
+        metric (str): La métrica a usar ('dtw' o 'sbd').
+        temperature (float): Factor para ajustar la suavidad de las probabilidades.
+
+    Returns:
+        numpy.ndarray: Vector de probabilidades para cada cluster.
+    """
+    # Calcular la distancia entre la nueva serie y cada centroide
+    distances = []
+    for centroid in centroids:
+        if metric == 'dtw':
+            distance = dtw(new_series, centroid)
+        elif metric == 'sbd':
+            distance, _ = sbd(new_series, centroid)
+        else:
+            raise ValueError("Métrica no soportada. Usa 'dtw' o 'sbd'.")
+        distances.append(distance)
+
+    distances = np.array(distances)
+
+    # Convertir las distancias a probabilidades usando una distribución exponencial inversa
+    scores = np.exp(-distances / temperature)
+    probabilities = scores / scores.sum()
+
+    return probabilities
+
+
 def generate_distributions(X, frequences=None, chunks=10, top_n=5):
     if frequences is None:
         frequences = np.array([[f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)] for s in X])
 
-    if len(frequences.shape) == 1:
+    if len(frequences.shape) == 1 and frequences.shape[0] > 0:
         noise_ratios = np.array([meta.noise_ratio(s) for s in X])
+        stability, slope = list(zip(*[meta.calculate_stability_and_slope(s) for s in X]))
+        slope = np.array(slope)
         return [[{"N": frequences.shape[0],
                   "frec_dist": (frequences.mean(), frequences.std()),
+                  "slope_dist": (slope.mean(), slope.std()),
                   "noise_dist": (noise_ratios.mean(), noise_ratios.std())
                   }]]
+    elif len(frequences.shape) == 1 and frequences.shape[0] == 0:
+        return [[{"frec_dist": (np.nan,)}]]
     elif len(frequences.shape) == 0 or frequences.shape[0] == 0:
         return [[{"frec_dist": (np.nan,)}]]
     else:
