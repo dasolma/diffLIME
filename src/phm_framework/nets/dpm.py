@@ -106,11 +106,13 @@ def get_network(input_size, widths, block_depth, num_features,
         timestep = tf.keras.Input(shape=(1,), name='time_step', dtype=tf.int32)
         embed = timestep_embedding(timesteps, embedding_size, embedding_factor)
 
-        embed = tf.gather(embed, timestep, tf.int32)
+        #embed = tf.gather(embed, timestep, tf.int32)
+        embed = Gather()(embed, timestep)
 
         for _ in range(embedding_layers):
             embed = tf.keras.layers.Dense(embedding_proj)(embed)
-            embed = tf.nn.swish(embed)
+
+            embed = Swish()(embed)
 
     if cond:
         features = tf.keras.Input(shape=(num_features, 1), name='features')
@@ -293,6 +295,15 @@ def UpBlock(width, block_depth, batch_norm):
 
     return apply
 
+class Gather(tf.keras.layers.Layer):
+
+    def call(self, embed, timestep):
+        return tf.gather(embed, timestep, tf.int32)
+
+class Swish(tf.keras.layers.Layer):
+
+    def call(self, x):
+        return tf.nn.swish(x)
 
 class DiffusionModel(tf.keras.Model):
     def __init__(self, input_size, widths, block_depth, timesteps, num_features=17,
@@ -322,7 +333,7 @@ class DiffusionModel(tf.keras.Model):
                                    num_features=self.num_features, cond=cond,
                                    timesteps=timesteps)
         self.cond = cond
-        self.__logs = defaultdict(lambda: [])
+        self.internal_logs = defaultdict(lambda: [])
         self.__images = []
         self.feature_loss_net = feature_loss_net
         self.feature_loss = feature_loss
@@ -592,7 +603,7 @@ class DiffusionModel(tf.keras.Model):
         # plot random generated samples for visual evaluation of generation quality
         nsamples = num_rows * num_cols + 2;
 
-        denoising_steps = 40
+        denoising_steps = self.timesteps
         t = np.array([denoising_steps] * signals.shape[0])
         signal_rates, noise_rates = (1 - self.timebars[t]), self.timebars[t]
         noise_rates = tf.reshape(noise_rates, (nsamples, 1, 1))
@@ -601,17 +612,17 @@ class DiffusionModel(tf.keras.Model):
         noise = noise * noise_rates
 
         base_signal = signals * signal_rates
-        noisy_samples = base_signal + noise
+        noisy_samples = (base_signal + noise).numpy()
 
         network = self.network
 
-        for i in range(denoising_steps):
+        for i in range(denoising_steps-1, 0, -1):
             t = np.array([i] * signals.shape[0])
 
             _input = self.prepare_inputs(noisy_samples, features, t)
-            pred_noises = dpm.network(_input, training=False)
+            pred_noises = self.network(_input, training=False)
 
-            noisy_samples = noisy_samples - pred_noises
+            noisy_samples = (noisy_samples - pred_noises).numpy()
 
         """
         pred_noise = None
@@ -674,19 +685,25 @@ class DiffusionModel(tf.keras.Model):
                     False)
 
         # show training losses
+        internal_logs = defaultdict(lambda: [])
+        for k, v in self.internal_logs.items():
+            internal_logs[k] = v
+
         for k, v in logs.items():
-            self.__logs[k].append(v)
+            internal_logs[k].append(v)
+
+        self.internal_logs = internal_logs
 
         ticks = range(1, epoch + 1)
         if len(ticks) > 5:
             step = len(ticks) // 5
             ticks = [t for t in ticks if t % step == 0]
 
-        labels, values = zip(*[(k, v) for k, v in self.__logs.items() if 'noise' in k])
+        labels, values = zip(*[(k, v) for k, v in self.internal_logs.items() if 'noise' in k])
         ax = plt.subplot(4, 2, 5)
         self.plot_loss(ax, values, labels, ticks, 'Noise loss')
 
-        labels, values = zip(*[(k, v) for k, v in self.__logs.items() if 'signal' in k])
+        labels, values = zip(*[(k, v) for k, v in self.internal_logs.items() if 'signal' in k])
         ax = plt.subplot(4, 2, 6)
         self.plot_loss(ax, values, labels, ticks, 'Signal loss')
 
