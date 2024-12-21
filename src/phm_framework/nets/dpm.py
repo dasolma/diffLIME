@@ -380,14 +380,14 @@ class DiffusionModel(tf.keras.Model):
         x_t = samples * (1 - nl_t) + noise_t
         x_t1 = samples * (1 - nl_t_plus_1) + noise_t_plus_1
 
-        return x_t, x_t1, t + 1, noise, nl_t_plus_1 - nl_t
+        return x_t, x_t1, t + 1, noise_t_plus_1 - noise_t, nl_t_plus_1 - nl_t
 
     def decode_samples(self, noisy_samples, pred_noises, noise_rates):
         """
         Return reconstructed samples
         """
 
-        return (noisy_samples - (pred_noises * noise_rates)) / (1 - noise_rates)
+        return (noisy_samples - pred_noises * noise_rates) / (1 - noise_rates)
 
     def denoise(self, noisy_samples, noise_rates, features, timesteps, training):
         """
@@ -410,7 +410,8 @@ class DiffusionModel(tf.keras.Model):
         _input = self.prepare_inputs(noisy_samples, features, timesteps)
         pred_noises = network(_input, training=training)
 
-        pred_samples = self.decode_samples(noisy_samples, pred_noises, noise_rates)
+        # pred_samples = self.decode_samples(noisy_samples, pred_noises, noise_rates)
+        pred_samples = noisy_samples - pred_noises
 
         return pred_noises, pred_samples
 
@@ -435,13 +436,12 @@ class DiffusionModel(tf.keras.Model):
 
         return _inputs
 
-    def neighbourhood(self, diffusion_steps, noisy_samples, noise_rates, signal_rates,
+    def neighbourhood(self, noisy_samples, noise_rates, signal_rates,
                       features=None, timesteps=None):
         """
         Perform denoising for a given number of diffusion steps.
 
         Args:
-        - diffusion_steps (int): Number of diffusion steps.
         - noisy_samples (tf.Tensor): Noisy input samples.
         - noise_rates (tf.Tensor): Noise rates for each sample.
         - signal_rates (tf.Tensor): Signal rates for each sample.
@@ -459,9 +459,9 @@ class DiffusionModel(tf.keras.Model):
 
         pred_samples = self.decode_samples(noisy_samples, pred_noises, noise_rates)
 
-        features = self.feature_loss_net(pred_samples)
+        # features = self.feature_loss_net(pred_samples)
 
-        return pred_samples, pred_noises, features
+        return pred_samples, pred_noises
 
     def train_step(self, samples):
         """
@@ -492,33 +492,16 @@ class DiffusionModel(tf.keras.Model):
                 x_t1, noise_rates, features, timesteps, training=True
             )
 
-            noise_loss = self.loss(noises, pred_noises)  # used for training
-            sample_loss = self.loss(x_t, pred_xt)  # only used as metric
+            noise_loss = self.loss(noises, pred_noises) / noise_rates  # used for training
+            sample_loss = self.loss(x_t, pred_xt) / (1 - noise_rates)  # only used as metric
 
-            if self.feature_loss_net:
-                features_pred = tf.expand_dims(self.feature_loss_net(pred_xt), axis=-1)
-
-                if features is not None:
-                    feature_loss = self.loss(features, features_pred)
-
-                if self.feature_loss and features is not None:
-                    total_loss = tf.reduce_mean(noise_loss, axis=-1) + \
-                                 tf.reduce_mean(feature_loss, axis=-1)
-
-                else:
-                    total_loss = tf.reduce_mean(noise_loss, axis=-1)
-
-            else:
-                total_loss = tf.reduce_mean(noise_loss, axis=-1)
+            total_loss = tf.reduce_mean(noise_loss, axis=-1)
 
         gradients = tape.gradient(total_loss, self.network.trainable_weights)
         self.optimizer.apply_gradients(zip(gradients, self.network.trainable_weights))
 
         self.noise_loss_tracker.update_state(noise_loss)
         self.sample_loss_tracker.update_state(sample_loss)
-
-        if self.feature_loss_net and features is not None:
-            self.feature_loss_tracker.update_state(feature_loss)
 
         return {m.name: m.result() for m in self.metrics}
 
@@ -538,8 +521,8 @@ class DiffusionModel(tf.keras.Model):
             noisy_samples, noise_rates, features, timesteps, training=False
         )
 
-        noise_loss = self.loss(noises, pred_noises)
-        sample_loss = self.loss(base_samples, pred_samples)
+        noise_loss = self.loss(noises, pred_noises) / noise_rates
+        sample_loss = self.loss(base_samples, pred_samples) / (1 - noise_rates)
 
         self.data = (base_samples, noisy_samples, timesteps, noises, noise_rates, pred_noises, pred_samples)
 
@@ -561,7 +544,7 @@ class DiffusionModel(tf.keras.Model):
 
         lines = []
         for s in signals:
-            l = plt.plot(s)
+            l = plt.plot(s, alpha=0.7)
             lines.append(l)
         plt.axis("off")
 
@@ -592,7 +575,7 @@ class DiffusionModel(tf.keras.Model):
         ax.title.set_text(title)
         ax.legend(loc='upper right')
 
-    def plot_images(self, signals, epoch=None, logs=None, num_rows=2, num_cols=6):
+    def plot_images(self, signals, features, epoch=None, logs=None, num_rows=2, num_cols=6):
 
         att = ['st', 'pr', 'pe', 'os', 'co', 'si', 'sl', 'in', 'pe', 'no',
                'dy', 'mn', 'mx', 'es', 'va']
@@ -609,10 +592,7 @@ class DiffusionModel(tf.keras.Model):
         # plot random generated samples for visual evaluation of generation quality
         nsamples = num_rows * num_cols + 2;
 
-
-        features = None
-
-        denoising_steps = 1
+        denoising_steps = 40
         t = np.array([denoising_steps] * signals.shape[0])
         signal_rates, noise_rates = (1 - self.timebars[t]), self.timebars[t]
         noise_rates = tf.reshape(noise_rates, (nsamples, 1, 1))
@@ -621,16 +601,33 @@ class DiffusionModel(tf.keras.Model):
         noise = noise * noise_rates
 
         base_signal = signals * signal_rates
-
         noisy_samples = base_signal + noise
 
-        generated_signals, pred_noise, features = self.neighbourhood(
-            1, noisy_samples, noise_rates, signal_rates, features=features,
-            timesteps=t,
-        )
+        network = self.network
 
-        pred_noise = pred_noise * noise_rates
+        for i in range(denoising_steps):
+            t = np.array([i] * signals.shape[0])
 
+            _input = self.prepare_inputs(noisy_samples, features, t)
+            pred_noises = dpm.network(_input, training=False)
+
+            noisy_samples = noisy_samples - pred_noises
+
+        """
+        pred_noise = None
+        for i in range(denoising_steps):
+            noisy_samples, pred_noise_t = self.neighbourhood(
+                noisy_samples, noise_rates, signal_rates, features=features,
+                timesteps=t,
+            )
+
+            if pred_noise is None:
+                pred_noise = pred_noise_t * noise_rates
+            else:
+                pred_noise = pred_noise + pred_noise_t * noise_rates
+        """
+
+        generated_signals = noisy_samples
         show = False
         try:
             clear_output(wait=True)
@@ -642,19 +639,19 @@ class DiffusionModel(tf.keras.Model):
         plt.suptitle(f'Epoch {epoch + 1}')
 
         ax = plt.subplot(4, 2, 1)
-        self.plot_signal((generated_signals[0],
+        self.plot_signal((noisy_samples[0],
                           signals[0],
-                          noisy_samples[0],
+                          generated_signals[0],
                           # noise[0],
                           # pred_noise[0],
                           ),
                          None,
                          None, ax, False,
-                         legend=['generated', 'original', 'noisy', 'noise', 'pred noise'])
+                         legend=['noisy', 'original', 'generated', 'noise', 'pred noise'])
         ax = plt.subplot(4, 2, 2)
-        self.plot_signal((generated_signals[1],
+        self.plot_signal((noisy_samples[1],
                           signals[1],
-                          noisy_samples[1],
+                          generated_signals[1],
                           # noise[1],
                           # pred_noise[1],
 
@@ -666,9 +663,9 @@ class DiffusionModel(tf.keras.Model):
                 index = row * num_cols + col + 12
                 ax = plt.subplot(num_rows * 4, num_cols, index + 1)
                 self.plot_signal((
-                    generated_signals[index - 10],
-                    signals[index - 10],
                     noisy_samples[index - 10],
+                    signals[index - 10],
+                    generated_signals[index - 10],
                     # noise[index-10],
                     # pred_noise[index-10],
 
@@ -693,14 +690,9 @@ class DiffusionModel(tf.keras.Model):
         ax = plt.subplot(4, 2, 6)
         self.plot_loss(ax, values, labels, ticks, 'Signal loss')
 
-        labels, values = zip(*[(k, v) for k, v in self.__logs.items() if 'feature' in k])
-        ax = plt.subplot(4, 2, 7)
-        self.plot_loss(ax, values, labels, ticks, 'Feature loss')
-
         plt.tight_layout()
 
         if show:
             plt.show()
 
         plt.close()
-
