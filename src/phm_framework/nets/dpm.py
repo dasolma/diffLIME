@@ -76,7 +76,7 @@ def timestep_embedding(max_steps, embedding_size, embedding_factor):
     return tf.concat([tf.sin(comp), tf.cos(comp)], axis=-1)
 
 def get_network(input_size, widths, block_depth, num_features,
-                batch_norm=False, cond=True, timesteps=False,
+                batch_norm=False, cond=True, envelopes=False, timesteps=False,
                 embedding_size=32, embedding_factor=4, embedding_proj=32,
                 embedding_layers=2):
     """
@@ -102,6 +102,12 @@ def get_network(input_size, widths, block_depth, num_features,
     # Define input layers
     noisy_samples = tf.keras.Input(shape=(input_size, 1), name='noisy_samples')
 
+    if envelopes:
+        envelop_inputs = tf.keras.Input(shape=(input_size, 2), name='envelopes')
+        x = tf.keras.layers.Concatenate()((noisy_samples, envelop_inputs))
+    else:
+        x = noisy_samples
+
     if timesteps:
         timestep = tf.keras.Input(shape=(1,), name='time_step', dtype=tf.int32)
         embed = timestep_embedding(timesteps, embedding_size, embedding_factor)
@@ -118,7 +124,7 @@ def get_network(input_size, widths, block_depth, num_features,
         features = tf.keras.Input(shape=(num_features, 1), name='features')
 
     # Initial convolutional layer
-    x = tf.keras.layers.Conv1D(widths[0], kernel_size=1)(noisy_samples)
+    x = tf.keras.layers.Conv1D(widths[0], kernel_size=1)(x)
 
     skips = []  # List to store skip connections
 
@@ -155,17 +161,15 @@ def get_network(input_size, widths, block_depth, num_features,
     x = tf.keras.layers.Conv1D(1, kernel_size=1, kernel_initializer="zeros")(x)
 
     # Create the model
+    inputs = [noisy_samples]
+    if envelopes:
+        inputs.append(envelop_inputs)
+    if cond:
+        inputs.append(features)
     if timesteps:
-        if cond:
-            return tf.keras.Model([noisy_samples, features, timestep], x, name="residual_unet")
-        else:
-            return tf.keras.Model([noisy_samples, timestep], x, name="residual_unet")
+        inputs.append(timestep)
 
-    else:
-        if cond:
-            return tf.keras.Model([noisy_samples, features], x, name="residual_unet")
-        else:
-            return tf.keras.Model([noisy_samples], x, name="residual_unet")
+    return tf.keras.Model(inputs, x, name="residual_unet")
 
 
 
@@ -307,7 +311,7 @@ class Swish(tf.keras.layers.Layer):
 
 class DiffusionModel(tf.keras.Model):
     def __init__(self, input_size, widths, block_depth, timesteps, num_features=17,
-                 cond=True, feature_names=None, feature_loss_net=False, feature_loss=True):
+                 cond=True, envelopes=False, feature_names=None, feature_loss_net=False, feature_loss=True):
         """
         Initialize a DiffusionModel.
 
@@ -331,8 +335,9 @@ class DiffusionModel(tf.keras.Model):
         self.num_features = num_features
         self.network = get_network(input_size, widths, block_depth, batch_norm=True,
                                    num_features=self.num_features, cond=cond,
-                                   timesteps=timesteps)
+                                   envelopes=envelopes, timesteps=timesteps)
         self.cond = cond
+        self.envelopes = envelopes
         self.internal_logs = defaultdict(lambda: [])
         self.__images = []
         self.feature_loss_net = feature_loss_net
@@ -400,7 +405,7 @@ class DiffusionModel(tf.keras.Model):
 
         return (noisy_samples - pred_noises * noise_rates) / (1 - noise_rates)
 
-    def denoise(self, noisy_samples, noise_rates, features, timesteps, training):
+    def denoise(self, noisy_samples, noise_rates, envelopes, features, timesteps, training):
         """
         Denoise the input noisy samples using the trained network.
 
@@ -418,7 +423,7 @@ class DiffusionModel(tf.keras.Model):
         """
         network = self.network
 
-        _input = self.prepare_inputs(noisy_samples, features, timesteps)
+        _input = self.prepare_inputs(noisy_samples, envelopes, features, timesteps)
         pred_noises = network(_input, training=training)
 
         # pred_samples = self.decode_samples(noisy_samples, pred_noises, noise_rates)
@@ -426,7 +431,7 @@ class DiffusionModel(tf.keras.Model):
 
         return pred_noises, pred_samples
 
-    def prepare_inputs(self, noisy_samples, features=None, timesteps=None):
+    def prepare_inputs(self, noisy_samples, envelopes=None, features=None, timesteps=None):
         """
         Prepare input data for the denoising network.
 
@@ -440,6 +445,9 @@ class DiffusionModel(tf.keras.Model):
         """
         _inputs = [noisy_samples]
 
+        if self.envelopes:
+            _inputs.append(envelopes)
+        
         if self.cond:
             _inputs.append(features)
 
@@ -484,15 +492,14 @@ class DiffusionModel(tf.keras.Model):
         Returns:
         - Dict[str, tf.Tensor]: Dictionary of training metrics.
         """
-
+        inputs = samples[0]
+        samples, inputs = inputs[0], inputs[1:]
+        envelopes, features = None, None
+        if self.envelopes:
+            envelopes, inputs = inputs[0], inputs[1:]
         if self.cond:
-            samples, features = samples[0]
-        else:
-            if len(samples[0]) == 2:
-                samples, features = samples[0]
-            else:
-                samples, features = samples[0], None
-
+            features, inputs = inputs[0], inputs[1:]
+       
         batch_size = samples.shape[0]
 
         x_t, x_t1, timesteps, noises, noise_rates = self.noise(samples)
@@ -500,7 +507,7 @@ class DiffusionModel(tf.keras.Model):
         with tf.GradientTape() as tape:
             # Train the network to predict the normal noise introduced
             pred_noises, pred_xt = self.denoise(
-                x_t1, noise_rates, features, timesteps, training=True
+                x_t1, noise_rates, envelopes, features, timesteps, training=True
             )
 
             noise_loss = self.loss(noises, pred_noises) / noise_rates  # used for training
@@ -517,19 +524,21 @@ class DiffusionModel(tf.keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, samples):
+        
+        inputs = samples 
+        samples, inputs = inputs[0], inputs[1:]
+        envelopes, features = None, None
+        if self.envelopes:
+            envelopes, inputs = inputs[0], inputs[1:]
         if self.cond:
-            samples, features = samples
-        else:
-            if len(samples[0]) == 2:
-                samples, features = samples[0]
-            else:
-                samples, features = samples[0], None
-
+            features, inputs = inputs[0], inputs[1:]
+            
+    
         base_samples, noisy_samples, timesteps, noises, noise_rates = self.noise(samples)
 
         # use the network to separate noisy samples to their components
         pred_noises, pred_samples = self.denoise(
-            noisy_samples, noise_rates, features, timesteps, training=False
+            noisy_samples, noise_rates, envelopes, features, timesteps, training=False
         )
 
         noise_loss = self.loss(noises, pred_noises) / noise_rates
@@ -586,7 +595,7 @@ class DiffusionModel(tf.keras.Model):
         ax.title.set_text(title)
         ax.legend(loc='upper right')
 
-    def plot_images(self, signals, features, epoch=None, logs=None, num_rows=2, num_cols=6):
+    def plot_images(self, signals, envelopes, features, epoch=None, logs=None, num_rows=2, num_cols=6):
 
         att = ['st', 'pr', 'pe', 'os', 'co', 'si', 'sl', 'in', 'pe', 'no',
                'dy', 'mn', 'mx', 'es', 'va']
@@ -619,7 +628,7 @@ class DiffusionModel(tf.keras.Model):
         for i in range(denoising_steps-1, 0, -1):
             t = np.array([i] * signals.shape[0])
 
-            _input = self.prepare_inputs(noisy_samples, features, t)
+            _input = self.prepare_inputs(noisy_samples, envelopes, features, t)
             pred_noises = self.network(_input, training=False)
 
             noisy_samples = (noisy_samples - pred_noises).numpy()

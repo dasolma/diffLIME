@@ -305,11 +305,15 @@ def generate_distributions(X, centroids, chunks=10, top_n=5):
         if len(frequences.shape) == 1 and frequences.shape[0] > 0:
             noise_ratios = np.array([meta.noise_ratio(s) for s in X])
             stability, slope = list(zip(*[meta.calculate_stability_and_slope(s) for s in X]))
+            #entropy = list([meta.calculate_entropy(s) for s in X])
+            #periodicity = list([meta.evaluate_periodicity(s, 10)])
             slope = np.array(slope)
             return [[{"N": frequences.shape[0],
                       "frec_dist": (frequences.mean(), frequences.std()),
                       "slope_dist": (slope.mean(), slope.std()),
                       "noise_dist": (noise_ratios.mean(), noise_ratios.std()),
+                      #"entropy_dist": (entropy.mean(), entropy.std()),
+                      #"periodicity_dist": (periodicity.mean(), periodicity.std()),
                       "env_probs": env_probs.mean(axis=0)
                       }]]
         elif len(frequences.shape) == 1 and frequences.shape[0] == 0:
@@ -337,6 +341,16 @@ def generate_distributions(X, centroids, chunks=10, top_n=5):
 
     return generate_distributions_aux(X, env_probs, frequences, chunks)
 
+def add_noise(x, snr):
+    snr1 = 10 ** (snr / 10.0)
+    xpower = np.mean(x ** 2, axis=0)
+    npower = xpower / snr1
+
+    center = np.random.normal(0, np.sqrt(npower))
+    noise = np.random.normal(center, np.sqrt(npower), x.shape)
+    noise_data = x + noise
+
+    return noise_data
 
 def generate_synth_data(X, N=10000, chunks=10, top_n=5):
 
@@ -356,9 +370,9 @@ def generate_synth_data(X, N=10000, chunks=10, top_n=5):
     Ns = np.array([d[-1]['N'] for d in distributions])
     Ns = np.array(np.round((Ns / np.sum(Ns)) * N), dtype=int)
 
-    XX = np.zeros((N, X.shape[1]))
-    EE = np.zeros((N, 2, X.shape[1]))
-    M = np.zeros((N, top_n + 3))
+    XX = np.zeros((2*N, X.shape[1]))
+    EE = np.zeros((2*N, 2, X.shape[1]))
+    M = np.zeros((2*N, top_n + 5))
     time = np.linspace(0, 10, X.shape[1])
     i = 0
     for d, n in zip(distributions, Ns):
@@ -370,19 +384,30 @@ def generate_synth_data(X, N=10000, chunks=10, top_n=5):
             eu, el = np.random.normal(centroids[ienvelope], stds[ienvelope] * 0.5)
             EE[i, 0] = eu
             EE[i, 1] = el
+            EE[i+1, 0] = eu
+            EE[i+1, 1] = el
 
             s = np.zeros((128,))
             for f in frequencies:
                 s += np.sin(time * f)
-
+            
             s, _ = adjust_to_envelopes_preserving_shape(s, eu, el)
             s = adjust_slope(s, slope)
-
+            
             XX[i] = s
+            M[i] = frequencies + [slope, 0, 
+                                  meta.calculate_entropy(s), 
+                                  meta.evaluate_periodicity(s, 10),
+                                  ienvelope]
+            
+            s = add_noise(np.copy(s), noise)
+            XX[i+1] = s
+            M[i+1] = frequencies + [slope, noise, 
+                                  meta.calculate_entropy(s), 
+                                  meta.evaluate_periodicity(s, 10),
+                                  ienvelope]
 
-            M[i] = frequencies + [slope, noise, ienvelope]
-
-            i += 1
+            i += 2
             if i >= XX.shape[0]:
                 break
 
