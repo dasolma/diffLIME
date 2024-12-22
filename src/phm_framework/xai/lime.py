@@ -1,88 +1,95 @@
-import cv2
 import numpy as np
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Lasso, Ridge
 from scipy.spatial.distance import cosine
-from phm_framework.xai.utils import segment, sampling, display
 
-class Lime:
+class DiffLIME:
 
-    def __init__(self, model, nsegments=5, nsamples=1000,
-                 feature_faker=lambda _min, _max, _mean, _std, _size: 0,
-                 verbose=False):
+    def __init__(self, model, dpm_model, envelopes, nsamples=1000, verbose=False):
         self.model = model
-        self.nsegments = nsegments
+        self.dpm_model = dpm_model
+        self.centroids = envelopes
         self.nsamples = nsamples
-        self.feature_faker = feature_faker
         self.random_state = 666
         self.verbose = verbose
+        self._data = None
+        self._targets = None
 
-    def _get_weights(self, data):
+    def _get_weights(self):
 
         def distance_fn(x):
             ref = x[0]
             distance = np.zeros((x.shape[0],))
             for i in range(x.shape[0]):
                 distance[i] = cosine(x[i], ref)
+                #distance[i] = np.sum((x[i] * ref)**2)
             return distance
 
-        distances = distance_fn(data)
-
+        distances = 1 - distance_fn(self._data)
+        
+        distances = (distances - np.min(distances)) / (np.max(distances) - np.min(distances))
+        
+        sigma = 1.0
+        
+        #return np.exp(-distances ** 2 / (2 * sigma ** 2)) 
         return distances
 
+    def prepare_data(self, signal):
+        dpm_model = self.dpm_model
+        centroids = self.centroids
+        
+        
+        self._data = np.zeros((self.nsamples, signal.shape[0]))
+        self._targets = np.zeros((self.nsamples,))
+        
+        
+        meta = synthetic.generate_meta(signal, centroids)
 
-    def explain(self, input_array):
+        self._data[0] = signal
+        
+        signal = np.squeeze(signal)
+        probs = cwru_model.predict(np.array([signal]), verbose=0)
+        prob = probs[0, probs.argmax()]
+        
+        source_klass = probs.argmax()
+        self._targets[0] = prob
+        #self._targets[0] = 1
 
-        mean_pred = self.model.predict(input_array)[0][0]
+        for i in range(self.nsamples-1):
+            sn = synthetic.generate_synthetic_from_dpm(np.copy(signal), 
+                                                       dpm_model, 
+                                                       centroids, 
+                                                       forced_features=meta, 
+                                                       noise_ratio=0.02, 
+                                                       N=1)
 
-        if len(input_array.shape) > 2:
-            input_array = input_array.squeeze()
-
-        # compute the mean prediction
-        #mean_pred = self.model.predict(np.array([mean_sample(input_array)]))[0][0]
-
-
-        # create the mask to train the linear model
-        nsamples = self.nsamples
-        mask = []
-        predictions = []
-        segments = segment(input_array, self.nsegments)
-        segments = sorted(segments, key=(lambda x: x[1]))
-        samples = sampling(input_array, segments, n=nsamples, feature_faker=self.feature_faker)
-        zs = np.array([s[1] for s in samples])
-        predictions = self.model.predict(zs, batch_size=128)
-        for zprime, z in samples:
-            mask.append(zprime)
+            probs = cwru_model.predict(np.array([sn]), verbose=0)
+            prob = probs[0, klass]
+            
+            self._data[i+1] = sn
+            self._targets[i+1] = prob
+            #self._targets[i+1] = 1 if probs.argmax() == source_klass else 0
 
 
-        # weights  of the masks
-        weights = self._get_weights(np.array(mask))
+    def explain(self, signal):
+        
+        if self._data is None:
+            self.prepare_data(signal)
+        
 
-        # train a ridge model to predict the predictions from the masks:
-        #    which relation exists beetween the permuted samples and the predictions?
         model_regressor = Ridge(alpha=1, fit_intercept=True, random_state=self.random_state)
-        model_regressor.fit(mask, predictions, sample_weight=weights)
-
-        prediction_score = model_regressor.score(mask, predictions, sample_weight=weights)
-        local_pred = model_regressor.predict(mask[0:1])
-
+        
+        weights = self._get_weights()
+        model_regressor.fit(self._data, self._targets, sample_weight=weights)
+        
+        prediction_score = model_regressor.score(self._data, self._targets, sample_weight=weights)
+        local_pred = model_regressor.predict(signal.reshape(1,-1))
+        
         if self.verbose:
-            print('Prediction score', prediction_score)
-            print('Intercept', model_regressor.intercept_)
-            print('Prediction_local', local_pred,)
+            print(f'Intercept: {model_regressor.intercept_}')
+            print(f'Local prediction: {local_pred}')
+            print(f'Prediction score: {prediction_score}')
+            
+        
+        exp = sorted(enumerate(model_regressor.coef_), key=lambda x: np.abs(x[1]), reverse=True)
+        return (model_regressor.intercept_, exp, prediction_score, local_pred)
 
-        heatmap = np.zeros(input_array.shape, np.float32)
-        for (i, s, e), imp in zip(segments, model_regressor.coef_[0]):
-            heatmap[i,s:e] = imp
-
-        return heatmap
-
-
-    def display(self, input_array, explanation):
-
-        s = input_array[0].squeeze()
-        aux_hm = cv2.resize(explanation.T, dsize=s.shape, interpolation=cv2.INTER_CUBIC).T
-
-        aux_hm =  (aux_hm - aux_hm.min()) / (aux_hm.max() - aux_hm.min())
-        importances = [[(i, j, j+1, aux_hm[i,j]) for j in range(s.shape[1])] for i in range(s.shape[0])]
-
-        display(s.T, importances)

@@ -1,4 +1,6 @@
 import numpy as np
+from phm_framework.data import meta
+
 def prepare_data(X, signal_col, subsignal_length=1000, signal_max_length=20000):
     units_array = X.unit.values
     signal_array = X[signal_col].values
@@ -6,7 +8,7 @@ def prepare_data(X, signal_col, subsignal_length=1000, signal_max_length=20000):
 
     N = signal_max_length // subsignal_length
     X = np.zeros((N * len(targets.keys()), subsignal_length))
-    Y = np.zeros((N * len(targets.keys()), 0))
+    Y = np.zeros((N * len(targets.keys()), 1))
 
     NN = 0
     for i, unit in enumerate(targets.keys()):
@@ -28,7 +30,7 @@ def prepare_data(X, signal_col, subsignal_length=1000, signal_max_length=20000):
     _xmin, _xmax = X.min(axis=1), X.max(axis=1)
     X = ((X.T - _xmin) / (_xmax - _xmin)).T
 
-    Y = X[:NN]
+    Y = Y[:NN]
 
     M = meta.get_attributes(X, n_jobs=8)
 
