@@ -342,82 +342,277 @@ def generate_distributions(X, centroids, chunks=10, top_n=5):
     return generate_distributions_aux(X, env_probs, frequences, chunks)
 
 def add_noise(x, snr):
-    snr1 = 10 ** (snr / 10.0)
-    xpower = np.mean(x ** 2, axis=0)
-    npower = xpower / snr1
+    """
+    Adds Gaussian noise to a signal based on a specified Signal-to-Noise Ratio (SNR).
 
+    Args:
+        x (numpy.ndarray): Input signal (1D array or multidimensional array).
+        snr (float): Desired Signal-to-Noise Ratio (SNR) in decibels (dB).
+
+    Returns:
+        numpy.ndarray: Signal with added noise.
+    """
+    # Convert SNR from decibels to a linear scale
+    snr_linear = 10 ** (snr / 10.0)
+    
+    # Calculate the power of the signal
+    xpower = np.mean(x ** 2, axis=0)
+    
+    # Calculate the required noise power to achieve the desired SNR
+    npower = xpower / snr_linear
+
+    # Generate a random mean for the noise centered around 0 with variance based on noise power
     center = np.random.normal(0, np.sqrt(npower))
+    
+    # Generate Gaussian noise with the calculated mean and variance
     noise = np.random.normal(center, np.sqrt(npower), x.shape)
+    
+    # Add the noise to the original signal
     noise_data = x + noise
 
     return noise_data
 
-def generate_synth_data(X, N=10000, chunks=10, top_n=5):
 
+def generate_meta(s, centroids, top_n=5):
+    """
+    Generates metadata for a given time series.
+
+    Args:
+        s (numpy.ndarray): Time series data (1D array).
+        centroids (numpy.ndarray): Centroids from the clustering process.
+        top_n (int, optional): Number of most important frequencies to extract. Default is 5.
+
+    Returns:
+        list: Metadata values including:
+            - Top `top_n` frequencies.
+            - Slope of the signal.
+            - Noise ratio.
+            - Entropy of the signal.
+            - Periodicity measure.
+            - Index of the closest envelope cluster.
+    """
+    # Calculate stability and slope of the time series
+    stability, slope = meta.calculate_stability_and_slope(s)
+    
+    # Calculate the noise ratio of the signal
+    noise = meta.noise_ratio(s)
+    
+    # Extract the top `top_n` frequencies from the signal
+    frecuencies = [f for f, _ in meta.extract_top_frequencies(s, top_n=top_n)]
+    
+    # Extract the upper and lower envelopes of the signal
+    envelope = extract_envelopes(s)
+    
+    # Assign the envelope to the nearest cluster using probabilities
+    ienvelope = assign_cluster_probabilities(np.array([envelope]), centroids).argmax()
+    
+    # Calculate the entropy of the signal
+    entropy = meta.calculate_entropy(s)
+    
+    # Evaluate the periodicity of the signal
+    periodicity = meta.evaluate_periodicity(s, 10)
+    
+    # Combine all calculated metadata into a single list
+    return frecuencies + [slope, noise, entropy, periodicity, ienvelope]
+
+
+def generate_synth_data(X, N=10000, chunks=10, top_n=5):
+    """
+    Generates synthetic time series data by clustering and sampling from distributions.
+
+    Args:
+        X (numpy.ndarray): Original dataset of time series (n_samples x n_timestamps).
+        N (int, optional): Total number of synthetic samples to generate. Default is 10,000.
+        chunks (int, optional): Number of chunks to divide data for distribution generation. Default is 10.
+        top_n (int, optional): Number of most important frequencies to consider. Default is 5.
+
+    Returns:
+        tuple: 
+            - (XX, EE, M): Synthetic dataset components:
+                - XX (numpy.ndarray): Generated time series data (2N x n_timestamps).
+                - EE (numpy.ndarray): Envelopes (upper and lower) for each series (2N x 2 x n_timestamps).
+                - M (numpy.ndarray): Metadata including frequencies, slope, noise, entropy, periodicity, and envelope index.
+            - (centroids, stds, kmeans): Clustering results:
+                - centroids (numpy.ndarray): Cluster centroids.
+                - stds (numpy.ndarray): Standard deviations for each cluster.
+                - kmeans: KMeans model trained on the dataset.
+    """
+    # Number of samples to use for clustering
     N4cluster = 1000
+
+    # Shuffle the indices of the dataset
     indexes = np.arange(1, X.shape[0])
     np.random.shuffle(indexes)
 
+    # Extract envelopes from detrended signals for clustering
     envolventes = [extract_envelopes(eliminar_pendiente(X[indexes[i]])) for i in range(N4cluster)]
     series_temporales = np.array(envolventes)[:N4cluster, :, :]
 
-    # Aplicar clustering con K-means y DTW
+    # Perform clustering on time series using K-means with DTW
     n_clusters = 10
     labels, centroids, stds, kmeans = clusterizar_series_temporales(series_temporales, n_clusters, metric='dtw')
 
+    # Generate distributions for clusters
     distributions = generate_distributions(X, centroids, chunks, top_n)
 
+    # Calculate the number of samples to generate for each cluster
     Ns = np.array([d[-1]['N'] for d in distributions])
     Ns = np.array(np.round((Ns / np.sum(Ns)) * N), dtype=int)
 
-    XX = np.zeros((2*N, X.shape[1]))
-    EE = np.zeros((2*N, 2, X.shape[1]))
-    M = np.zeros((2*N, top_n + 5))
+    # Initialize arrays for synthetic data, envelopes, and metadata
+    XX = np.zeros((2 * N, X.shape[1]))  # Double the samples: original and noisy versions
+    EE = np.zeros((2 * N, 2, X.shape[1]))  # Envelopes: upper and lower
+    M = np.zeros((2 * N, top_n + 5))  # Metadata: frequencies, slope, noise, entropy, periodicity, envelope index
+
+    # Time vector for synthetic signal generation
     time = np.linspace(0, 10, X.shape[1])
+
+    # Index for generated samples
     i = 0
+
+    # Generate synthetic data for each cluster
     for d, n in zip(distributions, Ns):
         for _ in range(n):
+            # Sample properties for the synthetic signal
             frequencies = [np.random.normal(*f["frec_dist"]) for f in d]
             slope = np.random.normal(*d[-1]["slope_dist"])
             noise = np.random.normal(*d[-1]["noise_dist"])
             ienvelope = np.random.choice(np.arange(len(d[-1]["env_probs"])), p=d[-1]["env_probs"])
             eu, el = np.random.normal(centroids[ienvelope], stds[ienvelope] * 0.5)
+
+            # Save envelopes for the signal
             EE[i, 0] = eu
             EE[i, 1] = el
-            EE[i+1, 0] = eu
-            EE[i+1, 1] = el
+            EE[i + 1, 0] = eu
+            EE[i + 1, 1] = el
 
+            # Generate the base synthetic signal
             s = np.zeros((128,))
             for f in frequencies:
                 s += np.sin(time * f)
-            
+
+            # Adjust the signal to match the envelopes
             s, _ = adjust_to_envelopes_preserving_shape(s, eu, el)
+
+            # Add slope to the signal
             s = adjust_slope(s, slope)
-            
+
+            # Save the clean signal and its metadata
             XX[i] = s
-            M[i] = frequencies + [slope, 0, 
-                                  meta.calculate_entropy(s), 
-                                  meta.evaluate_periodicity(s, 10),
-                                  ienvelope]
-            
-            s = add_noise(np.copy(s), noise)
-            XX[i+1] = s
-            M[i+1] = frequencies + [slope, noise, 
-                                  meta.calculate_entropy(s), 
+            M[i] = frequencies + [slope, 0,  # No noise for clean signal
+                                  meta.calculate_entropy(s),
                                   meta.evaluate_periodicity(s, 10),
                                   ienvelope]
 
+            # Add noise to the signal for a noisy version
+            s_noisy = add_noise(np.copy(s), noise)
+
+            # Save the noisy signal and its metadata
+            XX[i + 1] = s_noisy
+            M[i + 1] = frequencies + [slope, noise,
+                                      meta.calculate_entropy(s_noisy),
+                                      meta.evaluate_periodicity(s_noisy, 10),
+                                      ienvelope]
+
+            # Increment the index by 2 for the clean and noisy pair
             i += 2
+
+            # Break if the dataset reaches the target size
             if i >= XX.shape[0]:
                 break
 
+        # Break outer loop if the dataset is complete
         if i >= XX.shape[0]:
             break
 
+    # Return the generated synthetic dataset and clustering results
     return (XX, EE, M), (centroids, stds, kmeans)
 
 
+def generate_synthetic_from_dpm(s, model, centroids, N=10, noise_ratio=0.8, forced_features=None):
+    """
+    Generates a synthetic signal from a trained Diffusion Probabilistic Model (DPM).
+
+    Args:
+        s (numpy.ndarray): The input signal (1D array).
+        model: The trained DPM model used for synthesis.
+        centroids (numpy.ndarray): Centroids from a clustering algorithm used to condition the model.
+        N (int, optional): Number of diffusion steps for signal generation. Default is 10.
+        noise_ratio (float, optional): Ratio of noise to add to the input signal. Default is 0.8.
+
+    Returns:
+        numpy.ndarray: The generated synthetic signal.
+    """
+    # Generate metadata (features) for the input signal based on centroids
+    if forced_features is None:
+        f = generate_meta(s, centroids)
+    else:
+        f = np.copy(forced_features)
+
+    # Extract the upper and lower envelopes of the signal
+    e = extract_envelopes(s)
+
+    # Add Gaussian noise to the signal
+    sn = s + np.random.normal(size=(s.shape[0],)) * noise_ratio
+
+    # Reshape signal and metadata for model compatibility
+    sn = np.expand_dims(sn, axis=[0, -1])  # Add batch and channel dimensions
+    e = np.expand_dims(np.array(e).T, axis=0)  # Reshape envelopes for batching
+    f = np.expand_dims(f, axis=0)  # Reshape metadata for batching
+
+    # Iteratively remove noise using the diffusion model
+    for i in range(N, 0, -1):
+        t = np.array([[i]])  # Current time step
+
+        # Prepare inputs for the DPM model
+        _input = model.prepare_inputs(sn, e, f, t)
+
+        # Predict the noise at the current step
+        pred_noises = model.network(_input, training=False)
+
+        # Refine the noisy signal by subtracting predicted noise
+        sn = sn - pred_noises.numpy()
+
+    # Remove the batch and channel dimensions from the final signal
+    sn = sn[0, :, 0]
+
+    return sn
 
 
+def plot_clusters(series_temporales, labels, centroids, stds, n_clusters):
+    """
+    Dibuja los clusters con una cuadrícula de 3 columnas y N filas.
 
+    Args:
+        series_temporales (numpy.ndarray): Array de series temporales.
+        labels (numpy.ndarray): Etiquetas de los clusters.
+        centroids (numpy.ndarray): Centroides de los clusters.
+        n_clusters (int): Número de clusters.
+    """
+    # Determinar el número de filas y columnas
+    n_cols = 3
+    n_rows = int(np.ceil(n_clusters / n_cols))
+
+    plt.figure(figsize=(15, n_rows * 5))  # Ajustar tamaño según filas
+
+    for cluster_idx in range(n_clusters):
+        plt.subplot(n_rows, n_cols, cluster_idx + 1)  # Configurar subplot
+
+        s = centroids[cluster_idx, 0, :]
+        std = stds[cluster_idx, 0, :]
+        plt.plot(s)
+        plt.fill_between(np.arange(s.shape[0]), s-std, s+std, alpha=0.2)
+
+        s = centroids[cluster_idx, 1, :]
+        std = stds[cluster_idx, 1, :]
+        plt.plot(s)
+        plt.fill_between(np.arange(s.shape[0]), s-std, s+std, alpha=0.2)
+
+        plt.title(f"Cluster {cluster_idx}")
+        plt.ylim(0, 1)
+        plt.legend(loc="upper right")
+        plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
 
