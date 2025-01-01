@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 
-def create_conv_1d_network(input_shape, num_classes):
+def create_conv_1d_network(input_shape, num_classes, dropout=0, blocks=4):
     """
     This function defines a 1D CNN architecture suitable for RUL tasks.
     The model consists of multiple convolutional layers, followed by
@@ -28,7 +28,7 @@ def create_conv_1d_network(input_shape, num_classes):
     x = input
 
     # Add 4 blocks of convolutional and pooling layers
-    for i in range(4):
+    for i in range(blocks):
         # Each block contains three Conv1D layers with 64 filters and a kernel size of 3
         x = tf.keras.layers.Conv1D(64, 3, activation='relu', padding='same')(x)
         x = tf.keras.layers.Conv1D(64, 3, activation='relu', padding='same')(x)
@@ -40,15 +40,24 @@ def create_conv_1d_network(input_shape, num_classes):
     x = tf.keras.layers.Flatten()(x)
     # Fully connected layers for prediction
     x = tf.keras.layers.Dense(64, activation='relu')(x)
+    if dropout > 0:
+        x = tf.keras.layers.Dropout(dropout)(x)
     x = tf.keras.layers.Dense(32, activation='relu')(x)
+    if dropout > 0:
+        x = tf.keras.layers.Dropout(dropout)(x)
+
     # Output layer: single neuron with ReLU activation (suitable for regression tasks)
-    x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
+    if num_classes == 2:
+        x = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    else:
+        x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
+        
 
     # Create and return the Keras Model
     return tf.keras.models.Model(inputs=input, outputs=x)
 
 
-def train(train_data, num_classes, epochs, es=True, validation_data=None):
+def train(train_data, num_classes, epochs, es=True, validation_data=None, dropout=0, metrics=[]):
     """
     This function trains a 1D convolutional neural network using the provided training data and
     optional validation data. It employs early stopping during training and performs an initial
@@ -104,10 +113,17 @@ def train(train_data, num_classes, epochs, es=True, validation_data=None):
     valid_train = False
     while not valid_train:
         # Create and compile the model
-        model = create_conv_1d_network(X_train.shape[1:], num_classes)
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-                      metrics=['accuracy'],
-                      loss='sparse_categorical_crossentropy')
+        model = create_conv_1d_network(X_train.shape[1:], num_classes, dropout=dropout)
+        
+        if num_classes == 2:
+            model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                          metrics=['accuracy'] + metrics,
+                          loss='binary_crossentropy')
+
+        else:
+            model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
+                          metrics=['accuracy'],
+                          loss='sparse_categorical_crossentropy')
 
         # Perform an initial short training session (3 epochs) to validate training behavior
         results = model.fit(X_train, Y_train,

@@ -134,4 +134,44 @@ def plot_importances(signal, point_importances, prediction_score, local_pred,
     plt.subplots_adjust(hspace=0.2, wspace=0.3) 
     fig.suptitle(title, fontsize=20)
     
+def plot_clusters(time_series, labels, centroids, stds, n_clusters):
+    """
+    Plots clusters on a grid with 3 columns and N rows.
+
+    Args:
+        time_series (numpy.ndarray): Array of time series data.
+        labels (numpy.ndarray): Cluster labels.
+        centroids (numpy.ndarray): Cluster centroids.
+        stds (numpy.ndarray): Standard deviations for clusters.
+        n_clusters (int): Number of clusters.
+    """
+    # Determine the number of rows and columns
+    n_cols = 5
+    n_rows = int(np.ceil(n_clusters / n_cols))
+
+    fig = plt.figure(figsize=(30, n_rows * 5))  # Adjust figure size based on rows
+
+    plt.xticks([], [])
+    plt.yticks([], [])
+    plt.ylabel("CWRU", fontsize=60)
+    
+    for cluster_idx in range(n_clusters):
+        ax = plt.subplot(n_rows, n_cols, cluster_idx + 1)  # Configure subplot
+
+        s = centroids[cluster_idx, 0, :]
+        std = stds[cluster_idx, 0, :]
+        ax.plot(s, linewidth=4)
+        ax.fill_between(np.arange(s.shape[0]), s - std, s + std, alpha=0.2)
+
+        s = centroids[cluster_idx, 1, :]
+        std = stds[cluster_idx, 1, :]
+        ax.plot(s, linewidth=4, linestyle='dashed')
+        ax.fill_between(np.arange(s.shape[0]), s - std, s + std, alpha=0.2)
+
+        ax.set_ylim(0, 1)
+        ax.legend(loc="upper right")
+        ax.set_axis_off()
+
+    plt.tight_layout()
+
     
