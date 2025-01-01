@@ -554,11 +554,13 @@ def generate_synthetic_from_dpm(s, model, centroids, N=10, noise_ratio=0.8, forc
 
     # Add Gaussian noise to the signal
     sn = s + np.random.normal(size=(s.shape[0],)) * noise_ratio
+    sn = np.array([sn] * f.shape[0])
 
     # Reshape signal and metadata for model compatibility
-    sn = np.expand_dims(sn, axis=[0, -1])  # Add batch and channel dimensions
-    e = np.expand_dims(np.array(e).T, axis=0)  # Reshape envelopes for batching
-    f = np.expand_dims(f, axis=0)  # Reshape metadata for batching
+    sn = np.expand_dims(sn, axis=[-1])  # Add batch and channel dimensions
+    e = np.array(e).T  # Reshape envelopes for batching
+    e = np.array([e]* f.shape[0])
+    #f = np.expand_dims(f, axis=0)  # Reshape metadata for batching
 
     # Iteratively remove noise using the diffusion model
     for i in range(N, 0, -1):
@@ -574,10 +576,8 @@ def generate_synthetic_from_dpm(s, model, centroids, N=10, noise_ratio=0.8, forc
         sn = sn - pred_noises.numpy()
 
     # Remove the batch and channel dimensions from the final signal
-    sn = sn[0, :, 0]
-
+    sn = sn[:,:, 0]
     return sn
-
 
 def plot_clusters(series_temporales, labels, centroids, stds, n_clusters):
     """
